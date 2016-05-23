@@ -1450,7 +1450,7 @@ int virLXCProcessStart(virConnectPtr conn,
 
     string = virCommandToString(cmd);
     if (string)
-        VIR_DEBUG("TEST: About to run %s", string);
+        VIR_DEBUG("About to run %s", string);
     VIR_FREE(string);
 
     if (virCommandRun(cmd, &status) < 0)
