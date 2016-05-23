@@ -95,10 +95,12 @@ src/lxc/lxc_cgroup.c
 src/lxc/lxc_conf.c
 src/lxc/lxc_container.c
 src/lxc/lxc_controller.c
+src/lxc/lxc_criu.c
 src/lxc/lxc_domain.c
 src/lxc/lxc_driver.c
 src/lxc/lxc_fuse.c
 src/lxc/lxc_hostdev.c
+src/lxc/lxc_migration.c
 src/lxc/lxc_native.c
 src/lxc/lxc_process.c
 src/network/bridge_driver.c
