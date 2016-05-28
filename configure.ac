@@ -242,6 +242,7 @@ LIBVIRT_CHECK_AUDIT
 LIBVIRT_CHECK_AVAHI
 LIBVIRT_CHECK_BLKID
 LIBVIRT_CHECK_CAPNG
+LIBVIRT_CHECK_CRIU
 LIBVIRT_CHECK_CURL
 LIBVIRT_CHECK_DBUS
 LIBVIRT_CHECK_FUSE
@@ -425,6 +426,13 @@ AC_PATH_PROG([XSLTPROC], [xsltproc], [/usr/bin/xsltproc])
 AC_PATH_PROG([AUGPARSE], [augparse], [/usr/bin/augparse])
 AC_PROG_MKDIR_P
 AC_PROG_LN_S
+AC_PATH_PROG([CRIU], [criu], [no],
+	[$PATH:/sbin:/usr/sbin:/usr/local/sbin])
+AM_CONDITIONAL([WITH_CRIU], [test "x$ac_cv_path_CRIU" != "xno"])
+if test "x$ac_cv_path_CRIU" != "xno"; then
+	AC_DEFINE_UNQUOTED([CRIU], ["$CRIU"],
+	[Location of criu program])
+fi
 
 dnl External programs that we can use if they are available.
 dnl We will hard-code paths to these programs unless we cannot
