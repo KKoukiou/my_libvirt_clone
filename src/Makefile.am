@@ -1391,11 +1391,13 @@ libvirt_driver_lxc_impl_la_CFLAGS = \
 		$(LIBNL_CFLAGS) \
 		$(FUSE_CFLAGS) \
 		$(XDR_CFLAGS) \
+		$(CRIU_CFLAGS) \
 		-I$(srcdir)/access \
 		-I$(srcdir)/conf \
 		$(AM_CFLAGS)
 libvirt_driver_lxc_impl_la_LIBADD = \
                $(CAPNG_LIBS) \
+               $(CRIU_LIBS) \
                $(LIBNL_LIBS) \
                $(LIBXML_LIBS) \
                $(FUSE_LIBS)
