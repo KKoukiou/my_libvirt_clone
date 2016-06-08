@@ -146,6 +146,8 @@ struct _virLXCController {
     virCgroupPtr cgroup;
 
     virLXCFusePtr fuse;
+
+    int restore;
 };
 
 #include "lxc_controller_dispatch.h"
@@ -2404,8 +2406,10 @@ virLXCControllerRun(virLXCControllerPtr ctrl)
                                            containerhandshake[1],
                                            ctrl->nsFDs,
                                            ctrl->nconsoles,
-                                           containerTTYPaths)) < 0)
+                                           containerTTYPaths,
+                                           ctrl->restore)) < 0)
         goto cleanup;
+
     VIR_FORCE_CLOSE(control[1]);
     VIR_FORCE_CLOSE(containerhandshake[1]);
 
@@ -2419,6 +2423,7 @@ virLXCControllerRun(virLXCControllerPtr ctrl)
     if (virLXCControllerSetupCgroupLimits(ctrl) < 0)
         goto cleanup;
 
+    /* proc files for user namespace will be setup from criu */
     if (virLXCControllerSetupUserns(ctrl) < 0)
         goto cleanup;
 
@@ -2487,6 +2492,8 @@ int main(int argc, char *argv[])
     int ns_fd[VIR_LXC_DOMAIN_NAMESPACE_LAST];
     int handshakeFd = -1;
     bool bg = false;
+    int restore = -1;
+
     const struct option options[] = {
         { "background", 0, NULL, 'b' },
         { "name",   1, NULL, 'n' },
@@ -2498,6 +2505,7 @@ int main(int argc, char *argv[])
         { "share-net", 1, NULL, 'N' },
         { "share-ipc", 1, NULL, 'I' },
         { "share-uts", 1, NULL, 'U' },
+        { "restore", 1, NULL, 'r' },
         { "help", 0, NULL, 'h' },
         { 0, 0, 0, 0 },
     };
@@ -2525,7 +2533,7 @@ int main(int argc, char *argv[])
     while (1) {
         int c;
 
-        c = getopt_long(argc, argv, "dn:v:p:m:c:s:h:S:N:I:U:",
+        c = getopt_long(argc, argv, "dn:v:p:m:c:s:h:S:N:I:U:r:",
                         options, NULL);
 
         if (c == -1)
@@ -2601,6 +2609,14 @@ int main(int argc, char *argv[])
             securityDriver = optarg;
             break;
 
+        case 'r':
+             if (virStrToLong_i(optarg, NULL, 10, &restore) < 0) {
+                fprintf(stderr, "malformed --restore argument '%s'",
+                        optarg);
+                goto cleanup;
+            }
+            break;
+
         case 'h':
         case '?':
             fprintf(stderr, "\n");
@@ -2617,6 +2633,7 @@ int main(int argc, char *argv[])
             fprintf(stderr, "  -N FD, --share-net FD\n");
             fprintf(stderr, "  -I FD, --share-ipc FD\n");
             fprintf(stderr, "  -U FD, --share-uts FD\n");
+            fprintf(stderr, "  -r FD, --restore FD\n");
             fprintf(stderr, "  -h, --help\n");
             fprintf(stderr, "\n");
             rc = 0;
@@ -2668,6 +2685,8 @@ int main(int argc, char *argv[])
 
     ctrl->passFDs = passFDs;
     ctrl->npassFDs = npassFDs;
+
+    ctrl->restore = restore;
 
     for (i = 0; i < VIR_LXC_DOMAIN_NAMESPACE_LAST; i++) {
         if (ns_fd[i] != -1) {

@@ -765,7 +765,8 @@ LXC_CONTROLLER_SOURCES =					\
 		lxc/lxc_cgroup.c lxc/lxc_cgroup.h		\
 		lxc/lxc_domain.c lxc/lxc_domain.h		\
 		lxc/lxc_fuse.c lxc/lxc_fuse.h			\
-		lxc/lxc_controller.c
+		lxc/lxc_controller.c				\
+		lxc/lxc_criu.c lxc/lxc_criu.h
 
 SECURITY_DRIVER_APPARMOR_HELPER_SOURCES =			\
 		$(DATATYPES_SOURCES)				\
@@ -2950,6 +2951,7 @@ libvirt_lxc_LDFLAGS = \
 		$(NULL)
 libvirt_lxc_LDADD =			\
 		$(FUSE_LIBS) \
+		$(CRIU_LIBS) \
 		libvirt-net-rpc-server.la \
 		libvirt-net-rpc.la \
 		libvirt_security_manager.la \
@@ -2963,6 +2965,7 @@ libvirt_lxc_LDADD += $(SECDRIVER_LIBS)
 libvirt_lxc_CFLAGS =				\
 		-I$(srcdir)/conf	\
 		$(AM_CFLAGS)                    \
+		$(CRIU_CFLAGS)			\
 		$(PIE_CFLAGS)			\
 		$(LIBNL_CFLAGS)			\
 		$(FUSE_CFLAGS)			\
