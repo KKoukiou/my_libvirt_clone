@@ -53,6 +53,7 @@ enum {
 int lxcContainerSendContinue(int control);
 int lxcContainerWaitForContinue(int control);
 
+int lxcContainerRestore(int fd);
 int lxcContainerStart(virDomainDefPtr def,
                       virSecurityManagerPtr securityDriver,
                       size_t nveths,
