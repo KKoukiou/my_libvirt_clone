@@ -146,6 +146,8 @@ struct _virLXCController {
     virCgroupPtr cgroup;
 
     virLXCFusePtr fuse;
+
+    int restore;
 };
 
 #include "lxc_controller_dispatch.h"
@@ -2343,137 +2345,147 @@ virLXCControllerEventSendInit(virLXCControllerPtr ctrl,
 static int
 virLXCControllerRun(virLXCControllerPtr ctrl)
 {
-    int rc = -1;
-    int control[2] = { -1, -1};
-    int containerhandshake[2] = { -1, -1 };
-    char **containerTTYPaths = NULL;
-    size_t i;
+    if (ctrl->restore == -1) {
+        int rc = -1;
+        int control[2] = { -1, -1};
+        int containerhandshake[2] = { -1, -1 };
+        char **containerTTYPaths = NULL;
+        size_t i;
 
-    if (VIR_ALLOC_N(containerTTYPaths, ctrl->nconsoles) < 0)
-        goto cleanup;
-
-    if (socketpair(PF_UNIX, SOCK_STREAM, 0, control) < 0) {
-        virReportSystemError(errno, "%s",
-                             _("sockpair failed"));
-        goto cleanup;
-    }
-
-    if (socketpair(PF_UNIX, SOCK_STREAM, 0, containerhandshake) < 0) {
-        virReportSystemError(errno, "%s",
-                             _("socketpair failed"));
-        goto cleanup;
-    }
-
-    if (virLXCControllerSetupPrivateNS() < 0)
-        goto cleanup;
-
-    if (virLXCControllerSetupLoopDevices(ctrl) < 0)
-        goto cleanup;
-
-    if (virLXCControllerSetupResourceLimits(ctrl) < 0)
-        goto cleanup;
-
-    if (virLXCControllerSetupDevPTS(ctrl) < 0)
-        goto cleanup;
-
-    if (virLXCControllerPopulateDevices(ctrl) < 0)
-        goto cleanup;
-
-    if (virLXCControllerSetupAllDisks(ctrl) < 0)
-        goto cleanup;
-
-    if (virLXCControllerSetupAllHostdevs(ctrl) < 0)
-        goto cleanup;
-
-    if (virLXCControllerSetupFuse(ctrl) < 0)
-        goto cleanup;
-
-    if (virLXCControllerSetupConsoles(ctrl, containerTTYPaths) < 0)
-        goto cleanup;
-
-    if (lxcSetPersonality(ctrl->def) < 0)
-        goto cleanup;
-
-    if ((ctrl->initpid = lxcContainerStart(ctrl->def,
-                                           ctrl->securityManager,
-                                           ctrl->nveths,
-                                           ctrl->veths,
-                                           ctrl->npassFDs,
-                                           ctrl->passFDs,
-                                           control[1],
-                                           containerhandshake[1],
-                                           ctrl->nsFDs,
-                                           ctrl->nconsoles,
-                                           containerTTYPaths)) < 0)
-        goto cleanup;
-    VIR_FORCE_CLOSE(control[1]);
-    VIR_FORCE_CLOSE(containerhandshake[1]);
-
-    for (i = 0; i < ctrl->npassFDs; i++)
-        VIR_FORCE_CLOSE(ctrl->passFDs[i]);
-
-    if (ctrl->nsFDs)
-        for (i = 0; i < VIR_LXC_DOMAIN_NAMESPACE_LAST; i++)
-            VIR_FORCE_CLOSE(ctrl->nsFDs[i]);
-
-    if (virLXCControllerSetupCgroupLimits(ctrl) < 0)
-        goto cleanup;
-
-    if (virLXCControllerSetupUserns(ctrl) < 0)
-        goto cleanup;
-
-    if (virLXCControllerMoveInterfaces(ctrl) < 0)
-        goto cleanup;
-
-    if (virLXCControllerStartFuse(ctrl) < 0)
-        goto cleanup;
-
-    if (lxcContainerSendContinue(control[0]) < 0) {
-        virReportSystemError(errno, "%s",
-                             _("Unable to send container continue message"));
-        goto cleanup;
-    }
-
-    if (lxcContainerWaitForContinue(containerhandshake[0]) < 0) {
-        virReportSystemError(errno, "%s",
-                             _("error receiving signal from container"));
-        goto cleanup;
-    }
-
-    /* ...and reduce our privileges */
-    if (lxcControllerClearCapabilities() < 0)
-        goto cleanup;
-
-    if (virLXCControllerDaemonHandshake(ctrl) < 0)
-        goto cleanup;
-
-    for (i = 0; i < ctrl->nconsoles; i++)
-        if (virLXCControllerConsoleSetNonblocking(&(ctrl->consoles[i])) < 0)
+        if (VIR_ALLOC_N(containerTTYPaths, ctrl->nconsoles) < 0)
             goto cleanup;
 
-    /* We must not hold open a dbus connection for life
-     * of LXC instance, since dbus-daemon is limited to
-     * only a few 100 connections by default
-     */
-    virDBusCloseSystemBus();
+        if (socketpair(PF_UNIX, SOCK_STREAM, 0, control) < 0) {
+            virReportSystemError(errno, "%s",
+                                 _("sockpair failed"));
+            goto cleanup;
+        }
 
-    rc = virLXCControllerMain(ctrl);
+        if (socketpair(PF_UNIX, SOCK_STREAM, 0, containerhandshake) < 0) {
+            virReportSystemError(errno, "%s",
+                                 _("socketpair failed"));
+            goto cleanup;
+        }
 
-    virLXCControllerEventSendExit(ctrl, rc);
+        if (virLXCControllerSetupPrivateNS() < 0)
+            goto cleanup;
 
- cleanup:
-    VIR_FORCE_CLOSE(control[0]);
-    VIR_FORCE_CLOSE(control[1]);
-    VIR_FORCE_CLOSE(containerhandshake[0]);
-    VIR_FORCE_CLOSE(containerhandshake[1]);
+        if (virLXCControllerSetupLoopDevices(ctrl) < 0)
+            goto cleanup;
 
-    for (i = 0; i < ctrl->nconsoles; i++)
-        VIR_FREE(containerTTYPaths[i]);
-    VIR_FREE(containerTTYPaths);
+        if (virLXCControllerSetupResourceLimits(ctrl) < 0)
+            goto cleanup;
 
-    virLXCControllerStopInit(ctrl);
+        if (virLXCControllerSetupDevPTS(ctrl) < 0)
+            goto cleanup;
 
-    return rc;
+        if (virLXCControllerPopulateDevices(ctrl) < 0)
+            goto cleanup;
+
+        if (virLXCControllerSetupAllDisks(ctrl) < 0)
+            goto cleanup;
+
+        if (virLXCControllerSetupAllHostdevs(ctrl) < 0)
+            goto cleanup;
+
+        if (virLXCControllerSetupFuse(ctrl) < 0)
+            goto cleanup;
+
+        if (virLXCControllerSetupConsoles(ctrl, containerTTYPaths) < 0)
+            goto cleanup;
+
+        if (lxcSetPersonality(ctrl->def) < 0)
+            goto cleanup;
+
+        if ((ctrl->initpid = lxcContainerStart(ctrl->def,
+                                               ctrl->securityManager,
+                                               ctrl->nveths,
+                                               ctrl->veths,
+                                               ctrl->npassFDs,
+                                               ctrl->passFDs,
+                                               control[1],
+                                               containerhandshake[1],
+                                               ctrl->nsFDs,
+                                               ctrl->nconsoles,
+                                               containerTTYPaths)) < 0)
+            goto cleanup;
+
+        VIR_FORCE_CLOSE(control[1]);
+        VIR_FORCE_CLOSE(containerhandshake[1]);
+
+        for (i = 0; i < ctrl->npassFDs; i++)
+            VIR_FORCE_CLOSE(ctrl->passFDs[i]);
+
+        if (ctrl->nsFDs)
+            for (i = 0; i < VIR_LXC_DOMAIN_NAMESPACE_LAST; i++)
+                VIR_FORCE_CLOSE(ctrl->nsFDs[i]);
+
+        if (virLXCControllerSetupCgroupLimits(ctrl) < 0)
+            goto cleanup;
+
+        if (virLXCControllerSetupUserns(ctrl) < 0)
+            goto cleanup;
+
+        if (virLXCControllerMoveInterfaces(ctrl) < 0)
+            goto cleanup;
+
+        if (virLXCControllerStartFuse(ctrl) < 0)
+            goto cleanup;
+
+        if (lxcContainerSendContinue(control[0]) < 0) {
+            virReportSystemError(errno, "%s",
+                                 _("Unable to send container continue message"));
+            goto cleanup;
+        }
+
+        if (lxcContainerWaitForContinue(containerhandshake[0]) < 0) {
+            virReportSystemError(errno, "%s",
+                                 _("error receiving signal from container"));
+            goto cleanup;
+        }
+
+        /* ...and reduce our privileges */
+        if (lxcControllerClearCapabilities() < 0)
+            goto cleanup;
+
+        if (virLXCControllerDaemonHandshake(ctrl) < 0)
+            goto cleanup;
+
+        for (i = 0; i < ctrl->nconsoles; i++)
+            if (virLXCControllerConsoleSetNonblocking(&(ctrl->consoles[i])) < 0)
+                goto cleanup;
+
+        /* We must not hold open a dbus connection for life
+         * of LXC instance, since dbus-daemon is limited to
+         * only a few 100 connections by default
+         */
+        virDBusCloseSystemBus();
+
+        rc = virLXCControllerMain(ctrl);
+
+        virLXCControllerEventSendExit(ctrl, rc);
+
+     cleanup:
+        VIR_FORCE_CLOSE(control[0]);
+        VIR_FORCE_CLOSE(control[1]);
+        VIR_FORCE_CLOSE(containerhandshake[0]);
+        VIR_FORCE_CLOSE(containerhandshake[1]);
+
+        for (i = 0; i < ctrl->nconsoles; i++)
+            VIR_FREE(containerTTYPaths[i]);
+        VIR_FREE(containerTTYPaths);
+
+        virLXCControllerStopInit(ctrl);
+
+        return rc;
+    } else {
+        /* TODO
+         * Many things should be setup here
+         * ex: cgroups for the container, devices, etc*/
+        if ((ctrl->initpid = lxcContainerRestore(ctrl->def, ctrl->restore) < 0))
+            return -1;
+        return -1;
+    }
 }
 
 
@@ -2487,6 +2499,8 @@ int main(int argc, char *argv[])
     int ns_fd[VIR_LXC_DOMAIN_NAMESPACE_LAST];
     int handshakeFd = -1;
     bool bg = false;
+    int restore = -1;
+
     const struct option options[] = {
         { "background", 0, NULL, 'b' },
         { "name",   1, NULL, 'n' },
@@ -2498,6 +2512,7 @@ int main(int argc, char *argv[])
         { "share-net", 1, NULL, 'N' },
         { "share-ipc", 1, NULL, 'I' },
         { "share-uts", 1, NULL, 'U' },
+        { "restore", 0, NULL, 'r' },
         { "help", 0, NULL, 'h' },
         { 0, 0, 0, 0 },
     };
@@ -2525,7 +2540,7 @@ int main(int argc, char *argv[])
     while (1) {
         int c;
 
-        c = getopt_long(argc, argv, "dn:v:p:m:c:s:h:S:N:I:U:",
+        c = getopt_long(argc, argv, "dn:v:p:m:c:s:h:S:N:I:U:r:",
                         options, NULL);
 
         if (c == -1)
@@ -2601,6 +2616,14 @@ int main(int argc, char *argv[])
             securityDriver = optarg;
             break;
 
+        case 'r':
+             if (virStrToLong_i(optarg, NULL, 10, &restore) < 0) {
+                fprintf(stderr, "malformed --restore argument '%s'",
+                        optarg);
+                goto cleanup;
+            }
+            break;
+
         case 'h':
         case '?':
             fprintf(stderr, "\n");
@@ -2617,6 +2640,7 @@ int main(int argc, char *argv[])
             fprintf(stderr, "  -N FD, --share-net FD\n");
             fprintf(stderr, "  -I FD, --share-ipc FD\n");
             fprintf(stderr, "  -U FD, --share-uts FD\n");
+            fprintf(stderr, "  -r FD, --restore FD\n");
             fprintf(stderr, "  -h, --help\n");
             fprintf(stderr, "\n");
             rc = 0;
@@ -2731,6 +2755,8 @@ int main(int argc, char *argv[])
             goto cleanup;
         }
     }
+
+    ctrl->restore = restore;
 
     rc = virLXCControllerRun(ctrl);
 
