@@ -70,6 +70,8 @@
 #include "virprocess.h"
 #include "virstring.h"
 
+#include "lxc_criu.h"
+
 #define VIR_FROM_THIS VIR_FROM_LXC
 
 VIR_LOG_INIT("lxc.lxc_container");
@@ -112,6 +114,7 @@ struct __lxc_child_argv {
     char **ttyPaths;
     int handshakefd;
     int *nsInheritFDs;
+    int restorefd;
 };
 
 static int lxcContainerMountFSBlock(virDomainFSDefPtr fs,
@@ -2291,9 +2294,14 @@ static int lxcContainerChild(void *data)
     VIR_FORCE_CLOSE(argv->handshakefd);
 
     if (ret == 0) {
-        VIR_DEBUG("Executing init binary");
-        /* this function will only return if an error occurred */
-        ret = virCommandExec(cmd);
+        if (argv->restorefd == -1) {
+            VIR_DEBUG("Executing init binary");
+            /* this function will only return if an error occurred */
+            ret = virCommandExec(cmd);
+        } else {
+            VIR_DEBUG("Executing container restore criu function");
+            ret = lxcCriuRestore(vmDef, argv->restorefd);
+        }
     }
 
     if (ret != 0) {
@@ -2362,7 +2370,8 @@ int lxcContainerStart(virDomainDefPtr def,
                       int handshakefd,
                       int *nsInheritFDs,
                       size_t nttyPaths,
-                      char **ttyPaths)
+                      char **ttyPaths,
+                      int restorefd)
 {
     pid_t pid;
     int cflags;
@@ -2380,6 +2389,7 @@ int lxcContainerStart(virDomainDefPtr def,
         .ttyPaths = ttyPaths,
         .handshakefd = handshakefd,
         .nsInheritFDs = nsInheritFDs,
+        .restorefd = restorefd,
     };
 
     /* allocate a stack for the container */
