@@ -69,6 +69,7 @@
 #include "virnetdev.h"
 #include "virprocess.h"
 #include "virstring.h"
+#include "lxc_criu.h"
 
 #define VIR_FROM_THIS VIR_FROM_LXC
 
@@ -2329,6 +2330,24 @@ virArch lxcContainerGetAlt32bitArch(virArch arch)
         return VIR_ARCH_MIPSEL;
 
     return VIR_ARCH_NONE;
+}
+
+
+/**
+ * lxcContainerRestore:
+ * @def: pointer to virtual machine structure
+ * @fd: file descriptor associated with the directory of the snapshot
+ *
+ * Starts a container process by calling criu restore command
+ *
+ * Returns PID of container on success or -1 in case of error
+ *
+ */
+int lxcContainerRestore(virDomainDefPtr def ATTRIBUTE_UNUSED,
+                        int fd ATTRIBUTE_UNUSED)
+{
+    /*return lxcCriuRestore(def, fd);*/
+    return -1;
 }
 
 
