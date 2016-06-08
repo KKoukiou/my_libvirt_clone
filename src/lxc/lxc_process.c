@@ -123,7 +123,7 @@ virLXCProcessReboot(virLXCDriverPtr driver,
     virLXCProcessStop(driver, vm, VIR_DOMAIN_SHUTOFF_SHUTDOWN);
     vm->newDef = savedDef;
     if (virLXCProcessStart(conn, driver, vm,
-                           0, NULL, autodestroy, reason) < 0) {
+                           0, NULL, autodestroy, -1, reason) < 0) {
         VIR_WARN("Unable to handle reboot of vm %s",
                  vm->def->name);
         goto cleanup;
@@ -929,7 +929,8 @@ virLXCProcessBuildControllerCmd(virLXCDriverPtr driver,
                                 size_t nfiles,
                                 int handshakefd,
                                 int * const logfd,
-                                const char *pidfile)
+                                const char *pidfile,
+                                int restorefd)
 {
     size_t i;
     char *filterstr;
@@ -1007,6 +1008,12 @@ virLXCProcessBuildControllerCmd(virLXCDriverPtr driver,
 
     for (i = 0; i < nveths; i++)
         virCommandAddArgList(cmd, "--veth", veths[i], NULL);
+
+    if (restorefd != -1) {
+        virCommandAddArg(cmd, "--restore");
+        virCommandAddArgFormat(cmd, "%d", restorefd);
+        virCommandPassFD(cmd, restorefd, 0);
+    }
 
     virCommandPassFD(cmd, handshakefd, 0);
     virCommandDaemonize(cmd);
@@ -1181,6 +1188,8 @@ virLXCProcessEnsureRootFS(virDomainObjPtr vm)
  * @driver: pointer to driver structure
  * @vm: pointer to virtual machine structure
  * @autoDestroy: mark the domain for auto destruction
+ * @restorefd: file descriptor pointing to the restore directory (-1 if not
+ *             restoring)
  * @reason: reason for switching vm to running state
  *
  * Starts a vm
@@ -1192,6 +1201,7 @@ int virLXCProcessStart(virConnectPtr conn,
                        virDomainObjPtr vm,
                        unsigned int nfiles, int *files,
                        bool autoDestroy,
+                       int restorefd,
                        virDomainRunningReason reason)
 {
     int rc = -1, r;
@@ -1406,7 +1416,7 @@ int virLXCProcessStart(virConnectPtr conn,
                                                 files, nfiles,
                                                 handshakefds[1],
                                                 &logfd,
-                                                pidfile)))
+                                                pidfile, restorefd)))
         goto cleanup;
 
     /* now that we know it is about to start call the hook if present */
@@ -1511,6 +1521,9 @@ int virLXCProcessStart(virConnectPtr conn,
         goto cleanup;
     }
 
+    if (restorefd != -1)
+        goto skip_cgroup_checks;
+
     /* We know the cgroup must exist by this synchronization
      * point so lets detect that first, since it gives us a
      * more reliable way to kill everything off if something
@@ -1526,6 +1539,8 @@ int virLXCProcessStart(virConnectPtr conn,
                        vm->def->name);
         goto cleanup;
     }
+
+ skip_cgroup_checks:
 
     /* Get the machine name so we can properly delete it through
      * systemd later */
@@ -1634,7 +1649,7 @@ virLXCProcessAutostartDomain(virDomainObjPtr vm,
     if (vm->autostart &&
         !virDomainObjIsActive(vm)) {
         ret = virLXCProcessStart(data->conn, data->driver, vm,
-                                 0, NULL, false,
+                                 0, NULL, false, -1,
                                  VIR_DOMAIN_RUNNING_BOOTED);
         virDomainAuditStart(vm, "booted", ret >= 0);
         if (ret < 0) {

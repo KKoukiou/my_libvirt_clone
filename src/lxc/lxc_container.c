@@ -70,6 +70,8 @@
 #include "virprocess.h"
 #include "virstring.h"
 
+#include "lxc_criu.h"
+
 #define VIR_FROM_THIS VIR_FROM_LXC
 
 VIR_LOG_INIT("lxc.lxc_container");
@@ -112,6 +114,7 @@ struct __lxc_child_argv {
     char **ttyPaths;
     int handshakefd;
     int *nsInheritFDs;
+    int restorefd;
 };
 
 static int lxcContainerMountFSBlock(virDomainFSDefPtr fs,
@@ -266,7 +269,7 @@ static virCommandPtr lxcContainerBuildInitCmd(virDomainDefPtr vmDef,
  * Returns 0 on success or -1 in case of error
  */
 static int lxcContainerSetupFDs(int *ttyfd,
-                                size_t npassFDs, int *passFDs)
+                                size_t npassFDs, int *passFDs, int restorefd)
 {
     int rc = -1;
     int open_max;
@@ -362,6 +365,8 @@ static int lxcContainerSetupFDs(int *ttyfd,
     }
 
     for (fd = last_fd + 1; fd < open_max; fd++) {
+        if (fd == restorefd)
+            continue;
         int tmpfd = fd;
         VIR_MASS_CLOSE(tmpfd);
     }
@@ -1076,6 +1081,36 @@ static int lxcContainerMountFSDev(virDomainDefPtr def,
     VIR_FREE(path);
     return ret;
 }
+
+
+static int lxcContainerMountFSDevPTSRestore(virDomainDefPtr def,
+                                            const char *stateDir)
+{
+    int ret = -1;
+    char *path = NULL;
+    int flags = MS_MOVE;
+
+    VIR_DEBUG("Mount /dev/pts stateDir=%s", stateDir);
+
+    if (virAsprintf(&path, "%s/%s.devpts",
+                    stateDir, def->name) < 0)
+        return ret;
+
+    VIR_DEBUG("Trying to move %s to /dev/pts", path);
+
+    if (mount(path, "/dev/pts", NULL, flags, NULL) < 0) {
+        virReportSystemError(errno,
+                             _("Failed to mount %s on /dev/pts"),
+                             path);
+        goto cleanup;
+    }
+
+    ret = 0;
+ cleanup:
+    VIR_FREE(path);
+    return ret;
+}
+
 
 static int lxcContainerMountFSDevPTS(virDomainDefPtr def,
                                      const char *stateDir)
@@ -2120,6 +2155,139 @@ static int lxcAttachNS(int *ns_fd)
 }
 
 
+/*
+ * lxcContainerChildRestore:
+ * @data: pointer to container arguments
+ */
+static int lxcContainerChildRestore(void *data)
+{
+    lxc_child_argv_t *argv = data;
+    virDomainDefPtr vmDef = argv->config;
+    int ttyfd = -1;
+    int ret = -1;
+    char *ttyPath = NULL;
+    virDomainFSDefPtr root;
+    char *stateDir = NULL;
+    char *rootfs_mount = NULL;
+
+    if (NULL == vmDef) {
+        virReportError(VIR_ERR_INTERNAL_ERROR,
+                       "%s", _("lxcChild() passed invalid vm definition"));
+        goto cleanup;
+    }
+
+    if (lxcContainerWaitForContinue(argv->monitor) < 0) {
+        virReportSystemError(errno, "%s",
+                             _("Failed to read the container continue message"));
+        goto cleanup;
+    }
+    VIR_DEBUG("Received container continue message");
+
+    if (lxcContainerSetID(vmDef) < 0)
+        goto cleanup;
+
+    root = virDomainGetFilesystemForTarget(vmDef, "/");
+
+    if (argv->nttyPaths) {
+        const char *tty = argv->ttyPaths[0];
+        if (STRPREFIX(tty, "/dev/pts/"))
+            tty += strlen("/dev/pts/");
+        if (virAsprintf(&ttyPath, "%s/%s.devpts/%s",
+                        LXC_STATE_DIR, vmDef->name, tty) < 0)
+            goto cleanup;
+    } else {
+        virReportError(VIR_ERR_INTERNAL_ERROR, "%s",
+                       _("At least one tty is required"));
+        goto cleanup;
+    }
+
+    VIR_DEBUG("Container TTY path: %s", ttyPath);
+
+    ttyfd = open(ttyPath, O_RDWR);
+    if (ttyfd < 0) {
+        virReportSystemError(errno,
+                             _("Failed to open tty %s"),
+                             ttyPath);
+        goto cleanup;
+    }
+    VIR_DEBUG("Container TTY fd: %d", ttyfd);
+
+    if (lxcContainerSendContinue(argv->handshakefd) < 0) {
+        virReportSystemError(errno, "%s",
+                            _("Failed to send continue signal to controller"));
+        goto cleanup;
+    }
+
+    VIR_DEBUG("Setting up container's std streams");
+
+    if (lxcContainerSetupFDs(&ttyfd,
+                             argv->npassFDs, argv->passFDs, argv->restorefd) < 0)
+        goto cleanup;
+
+    /* CRIU needs the container's root bind mounted so that it is the root of
+     * some mount.
+     */
+
+    if (virAsprintf(&rootfs_mount, "/%s/%s.rootfs_mount", LXC_STATE_DIR, vmDef->name) < 0) {
+        virReportError(VIR_ERR_INTERNAL_ERROR, "%s",
+                       _("Failed to write rootfs dir mount path"));
+        goto cleanup;
+    }
+
+    if (virFileMakePath(rootfs_mount) < 0) {
+         virReportError(VIR_ERR_INTERNAL_ERROR, "%s",
+                       _("Failed to mkdir rootfs mount path"));
+        goto cleanup;
+    }
+
+    if (mount(root->src->path, rootfs_mount, NULL, MS_BIND|MS_REC, NULL) < 0) {
+        virReportError(VIR_ERR_INTERNAL_ERROR, "%s",
+                       _("Failed to create rootfs mountpoint"));
+        goto cleanup;
+    }
+
+    if (virFileResolveAllLinks(LXC_STATE_DIR, &stateDir) < 0)
+        goto cleanup;
+
+    /* Mounts /dev/pts */
+    if (lxcContainerMountFSDevPTSRestore(vmDef, stateDir) < 0) {
+        virReportSystemError(errno, "%s",
+                            _("Failed to mount dev/pts"));
+        goto cleanup;
+    }
+
+    if (setsid() < 0) {
+        virReportSystemError(errno, "%s",
+                             _("Unable to become session leader"));
+    }
+
+    ret = 0;
+
+ cleanup:
+    VIR_FORCE_CLOSE(argv->monitor);
+    VIR_FORCE_CLOSE(argv->handshakefd);
+    VIR_FORCE_CLOSE(ttyfd);
+    VIR_FREE(ttyPath);
+    VIR_FREE(rootfs_mount);
+    VIR_FREE(stateDir);
+
+    if (ret == 0) {
+        VIR_DEBUG("Executing container restore criu function");
+        ret = lxcCriuRestore(vmDef, argv->restorefd, 0);
+    }
+
+    if (ret != 0) {
+        VIR_DEBUG("Tearing down container");
+        fprintf(stderr,
+                _("Failure in libvirt_lxc startup: %s\n"),
+                virGetLastErrorMessage());
+    }
+
+    return ret;
+}
+
+
+
 /**
  * lxcContainerChild:
  * @data: pointer to container arguments
@@ -2242,7 +2410,7 @@ static int lxcContainerChild(void *data)
     VIR_FORCE_CLOSE(argv->handshakefd);
     VIR_FORCE_CLOSE(argv->monitor);
     if (lxcContainerSetupFDs(&ttyfd,
-                             argv->npassFDs, argv->passFDs) < 0)
+                             argv->npassFDs, argv->passFDs, -1) < 0)
         goto cleanup;
 
     /* Make init process of the container the leader of the new session.
@@ -2333,7 +2501,8 @@ int lxcContainerStart(virDomainDefPtr def,
                       int handshakefd,
                       int *nsInheritFDs,
                       size_t nttyPaths,
-                      char **ttyPaths)
+                      char **ttyPaths,
+                      int restorefd)
 {
     pid_t pid;
     int cflags;
@@ -2351,6 +2520,7 @@ int lxcContainerStart(virDomainDefPtr def,
         .ttyPaths = ttyPaths,
         .handshakefd = handshakefd,
         .nsInheritFDs = nsInheritFDs,
+        .restorefd = restorefd,
     };
 
     /* allocate a stack for the container */
@@ -2400,10 +2570,19 @@ int lxcContainerStart(virDomainDefPtr def,
         VIR_DEBUG("Inheriting a UTS namespace");
     }
 
-    VIR_DEBUG("Cloning container init process");
-    pid = clone(lxcContainerChild, stacktop, cflags, &args);
+    if (restorefd == -1)
+        VIR_DEBUG("Cloning container init process");
+    else
+        VIR_DEBUG("Cloning container process that will spawn criu restore");
+
+    if (restorefd != -1)
+        pid = clone(lxcContainerChildRestore, stacktop, SIGCHLD, &args);
+    else
+        pid = clone(lxcContainerChild, stacktop, cflags, &args);
+
     VIR_FREE(stack);
-    VIR_DEBUG("clone() completed, new container PID is %d", pid);
+    if (restorefd == -1)
+        VIR_DEBUG("clone() completed, new container PID is %d", pid);
 
     if (pid < 0) {
         virReportSystemError(errno, "%s",
