@@ -34,12 +34,18 @@
 # include "security/security_manager.h"
 # include "configmake.h"
 # include "vircgroup.h"
+# include "virportallocator.h"
 # include "virsysinfo.h"
 # include "virusb.h"
 # include "virclosecallbacks.h"
 # include "virhostdev.h"
 
 # define LXC_DRIVER_NAME "LXC"
+
+# if WITH_CRIU
+#  define LXC_MIGRATION_PORT_MIN 49152
+#  define LXC_MIGRATION_PORT_MAX 49216
+# endif
 
 # define LXC_CONFIG_DIR SYSCONFDIR "/libvirt/lxc"
 # define LXC_STATE_DIR LOCALSTATEDIR "/run/libvirt/lxc"
@@ -104,6 +110,12 @@ struct _virLXCDriver {
 
     /* Immutable pointer, self-locking APIs */
     virCloseCallbacksPtr closeCallbacks;
+
+# if WITH_CRIU
+    /* Immutable pointer, self-locking APIs */
+    virPortAllocatorPtr migrationPorts;
+# endif
+
 };
 
 virLXCDriverConfigPtr virLXCDriverConfigNew(void);
