@@ -83,7 +83,9 @@
 #include "viraccessapichecklxc.h"
 #include "virhostdev.h"
 #include "netdev_bandwidth_conf.h"
-
+#if WITH_CRIU
+# include  "lxc_criu.h"
+#endif
 #define VIR_FROM_THIS VIR_FROM_LXC
 
 VIR_LOG_INIT("lxc.lxc_driver");
@@ -3206,6 +3208,205 @@ static int lxcDomainResume(virDomainPtr dom)
     return ret;
 }
 
+#if WITH_CRIU
+static int
+lxcDomainSave(virDomainPtr dom, const char *to)
+{
+    int ret = -1;
+    virLXCDriverPtr driver = dom->conn->privateData;
+    virDomainObjPtr vm = NULL;
+    virCapsPtr caps = NULL;
+    uint32_t xml_len = -1;
+    char *xml = NULL;
+    int fd = -1;
+    char xmlLen[33];
+    char *xml_image_path = NULL;
+
+    if (!(vm = lxcDomObjFromDomain(dom)))
+            goto cleanup;
+
+    if (virDomainSaveEnsureACL(dom->conn, vm->def) < 0)
+        goto cleanup;
+
+    if ((ret = lxcCriuDump(to, driver, vm)) != 0) {
+        virReportError(VIR_ERR_INTERNAL_ERROR, "%s",
+                       _("Failed to checkpoint domain"));
+        goto out;
+    }
+
+    ret = -1;
+    if (virAsprintf(&xml_image_path, "%s/xml-image", to) < 0) {
+        virReportError(VIR_ERR_INTERNAL_ERROR, "%s",
+                       _("Failed to write image path"));
+        goto out;
+    }
+
+    if ((fd = open(xml_image_path, O_RDWR | O_CREAT, 0666)) < 0) {
+        virReportSystemError(-fd,
+                             _("Failed to create domain save file '%s'"),
+                               xml_image_path);
+        goto out;
+    }
+
+    if (!(caps = virLXCDriverGetCapabilities(driver, false)))
+        goto cleanup;
+
+    if ((xml = virDomainDefFormat(vm->def, caps, 0)) == NULL)
+        goto cleanup;
+
+    xml_len = strlen(xml) + 1;
+    snprintf(xmlLen, sizeof(uint32_t), "%d", xml_len);
+
+    if (safewrite(fd, xmlLen, strlen(xmlLen)) != strlen(xmlLen)) {
+        virReportError(VIR_ERR_OPERATION_FAILED, "%s",
+                       _("Failed to write xml size"));
+        goto cleanup;
+    }
+
+    if (safewrite(fd, "\n", 1) != 1) {
+        virReportError(VIR_ERR_OPERATION_FAILED, "%s",
+                       _("Failed to write a newline char"));
+        goto cleanup;
+    }
+
+    if (safewrite(fd, xml, xml_len) != xml_len) {
+        virReportError(VIR_ERR_OPERATION_FAILED, "%s",
+                       _("Failed to write xml description"));
+        goto cleanup;
+    }
+    ret = 0;
+
+ cleanup:
+    VIR_FORCE_CLOSE(fd);
+ out:
+    VIR_FREE(xml_image_path);
+    VIR_FREE(xml);
+    virObjectUnref(caps);
+    virDomainObjEndAPI(&vm);
+    return ret;
+}
+#else
+static int
+lxcDomainSave(virDomainPtr dom ATTRIBUTE_UNUSED,
+              const char *to ATTRIBUTE_UNUSED)
+{
+    virReportUnsupportedError();
+}
+#endif
+
+#if WITH_CRIU
+static int
+lxcDomainRestore(virConnectPtr conn, const char *from)
+{
+    int ret = -1;
+    int restorefd;
+    virLXCDriverPtr driver = conn->privateData;
+    virDomainObjPtr vm = NULL;
+    virDomainDefPtr def = NULL;
+    char *xml = NULL;
+    virCapsPtr caps = NULL;
+    u_int32_t xmlLen = 0;
+    int fd;
+    char *xml_image_path = NULL;
+
+    if (virAsprintf(&xml_image_path, "%s/xml-image", from) < 0) {
+        virReportError(VIR_ERR_INTERNAL_ERROR, "%s",
+                             _("Failed to write xml image path"));
+        goto out;
+    }
+
+    if ((fd = virFileOpenAs(xml_image_path, O_RDONLY, 0, -1, -1, 0)) < 0) {
+        virReportSystemError(-fd,
+                             _("Failed to open domain image file '%s'"), xml_image_path);
+        goto out;
+    }
+
+    char c;
+    while ((saferead(fd,  &c, 1) == 1) &&  c != '\n')
+        xmlLen = xmlLen*10 + c - '0';
+
+    if (VIR_ALLOC_N(xml, xmlLen) < 0)
+        goto cleanup;
+
+    if (saferead(fd, xml, xmlLen) != xmlLen) {
+        virReportError(VIR_ERR_OPERATION_FAILED, "%s", _("failed to read XML"));
+        goto cleanup;
+    }
+
+    if (!xml) {
+        virReportError(VIR_ERR_INTERNAL_ERROR, "%s",
+                       _("no domain XML parsed"));
+        goto cleanup;
+    }
+
+    if (!(caps = virLXCDriverGetCapabilities(driver, false)))
+        goto cleanup;
+
+    if (!(def = virDomainDefParseString(xml, caps, driver->xmlopt,
+                                        VIR_DOMAIN_DEF_PARSE_INACTIVE)))
+        goto cleanup;
+
+    if (virDomainRestoreEnsureACL(conn, def) < 0)
+        goto cleanup;
+
+    if (!(vm = virDomainObjListAdd(driver->domains, def,
+                                   driver->xmlopt,
+                                   VIR_DOMAIN_OBJ_LIST_ADD_LIVE |
+                                   VIR_DOMAIN_OBJ_LIST_ADD_CHECK_LIVE,
+                                   NULL)))
+        goto cleanup;
+
+    def = NULL;
+
+    if (virLXCDomainObjBeginJob(driver, vm, LXC_JOB_MODIFY) < 0) {
+        if (!vm->persistent)
+            virDomainObjListRemove(driver->domains, vm);
+        goto cleanup;
+    }
+
+    restorefd = open(from, O_DIRECTORY);
+    if (restorefd < 0) {
+        virReportError(VIR_ERR_INTERNAL_ERROR,
+                       "%s", _("Can't open images dir"));
+        if (!vm->persistent)
+            virDomainObjListRemove(driver->domains, vm);
+        virLXCDomainObjEndJob(driver, vm);
+        goto cleanup;
+    }
+
+    ret = virLXCProcessStart(conn, driver, vm,
+                             0, NULL,
+                             0, restorefd,
+                             VIR_DOMAIN_RUNNING_MIGRATED);
+
+    VIR_FORCE_CLOSE(restorefd);
+
+    if (ret != 0) {
+        virReportError(VIR_ERR_INTERNAL_ERROR, "%s",
+                       _("Failed to restore domain"));
+    }
+
+    if (ret < 0 && !vm->persistent)
+        virDomainObjListRemove(driver->domains, vm);
+
+ virLXCDomainObjEndJob(driver, vm);
+ cleanup:
+    VIR_FORCE_CLOSE(fd);
+ out:
+    virDomainDefFree(def);
+    VIR_FREE(xml_image_path);
+    VIR_FREE(xml);
+    virDomainObjEndAPI(&vm);
+    return ret;
+}
+#else
+static int
+lxcDomainRestore(virConnectPtr conn ATTRIBUTE_UNUSED, const char *from ATTRIBUTE_UNUSED)
+{
+    virReportUnsupportedError();
+}
+#endif
+
 static int
 lxcDomainOpenConsole(virDomainPtr dom,
                       const char *dev_name,
@@ -5534,6 +5735,8 @@ static virHypervisorDriver lxcHypervisorDriver = {
     .domainLookupByName = lxcDomainLookupByName, /* 0.4.2 */
     .domainSuspend = lxcDomainSuspend, /* 0.7.2 */
     .domainResume = lxcDomainResume, /* 0.7.2 */
+    .domainSave = lxcDomainSave, /* x.x.x */
+    .domainRestore = lxcDomainRestore, /* x.x.x */
     .domainDestroy = lxcDomainDestroy, /* 0.4.4 */
     .domainDestroyFlags = lxcDomainDestroyFlags, /* 0.9.4 */
     .domainGetOSType = lxcDomainGetOSType, /* 0.4.2 */

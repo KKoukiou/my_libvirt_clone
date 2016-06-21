@@ -2484,7 +2484,7 @@ virLXCControllerRun(virLXCControllerPtr ctrl)
          * ex: cgroups for the container, devices, etc*/
         if ((ctrl->initpid = lxcContainerRestore(ctrl->def, ctrl->restore) < 0))
             return -1;
-        return -1;
+        return 0;
     }
 }
 
