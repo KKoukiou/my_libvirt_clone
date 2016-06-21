@@ -42,6 +42,7 @@ AM_CFLAGS =	$(LIBXML_CFLAGS)				\
 		$(LOCK_CHECKING_CFLAGS)				\
 		$(WIN32_EXTRA_CFLAGS)				\
 		$(COVERAGE_CFLAGS)
+
 AM_LDFLAGS =	$(DRIVER_MODULE_LDFLAGS)			\
 		$(COVERAGE_LDFLAGS)				\
 		$(RELRO_LDFLAGS)				\
@@ -749,6 +750,13 @@ LXC_DRIVER_SOURCES =						\
 		lxc/lxc_fuse.c lxc/lxc_fuse.h			\
 		lxc/lxc_native.c lxc/lxc_native.h		\
 		lxc/lxc_driver.c lxc/lxc_driver.h
+if WITH_CRIU
+LXC_DRIVER_SOURCES +=							\
+		lxc/lxc_criu.c lxc_criu.h
+else ! WITH_CRIU
+EXTRA_DIST += 									\
+		lxc/lxc_criu.c lxc_criu.h
+endif ! WITH_CRIU
 
 LXC_CONTROLLER_SOURCES =					\
 		$(LXC_MONITOR_PROTOCOL_GENERATED)		\
